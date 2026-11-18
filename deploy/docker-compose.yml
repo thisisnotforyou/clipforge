@@ -1,0 +1,31 @@
+# ClipForge on one server: the app + Caddy for automatic HTTPS.
+# Started by deploy/server-setup.sh, which sets DOMAIN.
+services:
+  clipforge:
+    build: ..
+    restart: unless-stopped
+    environment:
+      MAX_WORKERS: ${MAX_WORKERS:-2}
+      JOB_TTL_HOURS: ${JOB_TTL_HOURS:-12}
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_COOKIES: ${YTDLP_COOKIES:-}
+    volumes:
+      - jobs:/data
+    expose:
+      - "7860"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [clipforge]
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from ${DOMAIN} --to clipforge:7860
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  jobs:
+  caddy_data:

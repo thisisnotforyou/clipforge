@@ -28,7 +28,20 @@ Needs ffmpeg and python3.
 ./start.sh --lan    # also phones/laptops on the same Wi-Fi
 ```
 
-## Put it online for everyone: Hugging Face Spaces (free, easiest)
+## Put it online for everyone: Oracle Cloud free VM (free forever)
+
+1. Sign up at oracle.com/cloud/free (needs a card for verification, not charged on Always Free).
+2. Compute → Instances → Create: image **Ubuntu 24.04**, shape **Ampere VM.Standard.A1.Flex** (4 OCPU, 24 GB), download the SSH private key.
+3. Networking → your VCN → Default Security List → add ingress rules for TCP **80** and **443** from `0.0.0.0/0`.
+4. SSH in and run:
+   ```bash
+   git clone https://github.com/thisisnotforyou/clipforge && cd clipforge && sudo bash deploy/server-setup.sh
+   ```
+5. Open `https://<ip-with-dashes>.sslip.io` (the script prints it). Run the same script again to update.
+
+Extra settings (proxy, cookies, workers) go in `deploy/extra.env`, e.g. `YTDLP_PROXY=http://user:pass@host:port`.
+
+## Or: Hugging Face Spaces (needs PRO, $9/month)
 
 One Space runs the website and the clip engine together at one link.
 
