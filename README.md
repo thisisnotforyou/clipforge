@@ -1,3 +1,14 @@
+---
+title: ClipForge
+emoji: 🎬
+colorFrom: pink
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Paste a link, get edited 9:16 clips with captions
+---
+
 # ClipForge
 
 Paste a YouTube / Twitch / Kick link (or upload a video) and get ready-to-post 9:16 clips.
@@ -17,7 +28,17 @@ Needs ffmpeg and python3.
 ./start.sh --lan    # also phones/laptops on the same Wi-Fi
 ```
 
-## Put it online for everyone
+## Put it online for everyone: Hugging Face Spaces (free, easiest)
+
+One Space runs the website and the clip engine together at one link.
+
+1. huggingface.co → New Space → SDK **Docker** → Blank → CPU basic (free) → Create.
+2. Push this repo to it: `git remote add space https://huggingface.co/spaces/<you>/<space>` then `git push space main`.
+3. Wait for the build (about 5 min), then open `https://<you>-<space>.hf.space`.
+
+Free Spaces sleep after 48 h with no visitors and wake on the next visit (about 1 min). Clips are kept until the Space restarts.
+
+## Or: website on Vercel + engine on another host
 
 The site has two parts:
 
