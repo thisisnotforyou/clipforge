@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipForge · Paste a link, get clips</title>
+<meta name="description" content="Paste a YouTube, Twitch or Kick link and get edited 9:16 clips with captions, free.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0b12; --panel:#14141f; --panel2:#1b1b29; --line:#2a2a3d;
+  --text:#f2f2f7; --muted:#9a9ab0; --pink:#ff2bd6; --cyan:#22f0ff; --yellow:#ffe600;
+  --danger:#ff5470; --radius:16px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 Inter,system-ui,sans-serif;
+  background-image:radial-gradient(900px 500px at 85% -10%,rgba(255,43,214,.18),transparent 60%),
+  radial-gradient(800px 500px at -10% 10%,rgba(34,240,255,.12),transparent 60%);min-height:100vh}
+a{color:var(--cyan)}
+.wrap{max-width:1040px;margin:0 auto;padding:0 16px}
+header{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
+.logo{font:700 22px "Space Grotesk",sans-serif;letter-spacing:-.5px;display:flex;gap:10px;align-items:center}
+.logo i{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--pink),var(--cyan));display:inline-block}
+.hero{padding:40px 0 24px;text-align:center}
+.hero h1{font:700 clamp(36px,7vw,68px)/1.02 "Space Grotesk",sans-serif;margin:0 0 14px;letter-spacing:-1.5px}
+.hero h1 span{background:linear-gradient(90deg,var(--pink),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{color:var(--muted);max-width:620px;margin:0 auto;font-size:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin:28px 0}
+.tabs{display:flex;gap:6px;margin-bottom:14px}
+.tab{flex:0 0 auto;background:transparent;border:1px solid var(--line);color:var(--muted);padding:8px 14px;border-radius:999px;cursor:pointer;font:600 14px Inter}
+.tab.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+.row{display:flex;gap:10px}
+input[type=url]{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:16px;border-radius:12px;font-size:16px;outline:none}
+input[type=url]:focus{border-color:var(--cyan)}
+.drop{flex:1;border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center;color:var(--muted);cursor:pointer}
+.drop.has{border-color:var(--cyan);color:var(--text)}
+.go{background:linear-gradient(135deg,var(--pink),#b43cff);color:#fff;border:0;border-radius:12px;padding:0 26px;font:700 16px "Space Grotesk";cursor:pointer;white-space:nowrap}
+.go:disabled{opacity:.5;cursor:not-allowed}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:18px}
+.opt label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:600}
+.seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg button{flex:1;background:transparent;border:0;color:var(--muted);padding:8px 6px;border-radius:8px;cursor:pointer;font:600 13px Inter}
+.seg button.on{background:var(--line);color:var(--text)}
+.range{display:flex;align-items:center;gap:10px}
+.range input{flex:1;accent-color:var(--pink)}
+.range b{min-width:40px;text-align:right;font-variant-numeric:tabular-nums}
+.checks{display:flex;gap:16px;flex-wrap:wrap;padding-top:6px}
+.checks label{display:flex;gap:6px;align-items:center;color:var(--text);font-size:14px;font-weight:500;margin:0}
+.err{color:var(--danger);margin-top:12px;font-weight:500;min-height:1em}
+#status{display:none}
+.bar{height:10px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:12px 0 8px}
+.bar div{height:100%;width:0;background:linear-gradient(90deg,var(--pink),var(--cyan));transition:width .5s}
+.stage{display:flex;justify-content:space-between;color:var(--muted);font-size:14px;gap:12px}
+.stage b{color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:18px;margin-top:18px}
+.clip{background:var(--panel2);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.clip video{width:100%;aspect-ratio:9/16;background:#000;display:block}
+.clip .meta{padding:12px;display:flex;flex-direction:column;gap:8px;flex:1}
+.clip .cap{font-size:14px;font-weight:600}
+.clip .tags{font-size:12px;color:var(--cyan);word-break:break-word}
+.clip .btns{display:flex;gap:8px;margin-top:auto}
+.btn{flex:1;text-align:center;background:var(--line);color:var(--text);border:0;border-radius:9px;padding:9px;font:600 13px Inter;cursor:pointer;text-decoration:none}
+.btn.primary{background:var(--text);color:var(--bg)}
+.rank{font:700 12px "Space Grotesk";color:var(--yellow)}
+.allbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.how{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:10px 0 40px}
+.how div{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+.how h3{font:700 17px "Space Grotesk";margin:0 0 6px}
+.how p{margin:0;color:var(--muted);font-size:14px}
+.how .n{font:700 13px "Space Grotesk";color:var(--pink)}
+footer{color:var(--muted);font-size:13px;padding:24px 0 40px;border-top:1px solid var(--line)}
+@media (max-width:640px){.row{flex-direction:column}.go{padding:14px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><i></i>ClipForge</div>
+    <a href="#how" style="color:var(--muted);text-decoration:none;font-size:14px">How it works</a>
+  </header>
+
+  <section class="hero">
+    <h1>Paste a link.<br><span>Get viral clips.</span></h1>
+    <p>Drop a YouTube, Twitch or Kick video or past stream. We find the best moments, cut them to 9:16, add captions and give you ready-to-post clips.</p>
+  </section>
+
+  <section class="card" id="form">
+    <div class="tabs">
+      <button class="tab on" data-src="link">Paste a link</button>
+      <button class="tab" data-src="file">Upload a video</button>
+    </div>
+    <div class="row">
+      <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+      <div id="drop" class="drop" style="display:none">Tap to choose a video file (MP4, MOV, MKV)</div>
+      <input id="file" type="file" accept="video/*" hidden>
+      <button id="go" class="go">Make clips →</button>
+    </div>
+
+    <div class="opts">
+      <div class="opt"><label>Number of clips</label>
+        <div class="range"><input id="num" type="range" min="1" max="8" value="3"><b id="numv">3</b></div></div>
+      <div class="opt"><label>Clip length</label>
+        <div class="range"><input id="len" type="range" min="15" max="90" step="5" value="30"><b id="lenv">30s</b></div></div>
+      <div class="opt"><label>Editing style</label>
+        <div class="seg" data-k="style"><button data-v="neon" class="on">Neon</button><button data-v="clean">Clean</button></div></div>
+      <div class="opt"><label>Frame</label>
+        <div class="seg" data-k="layout"><button data-v="blur" class="on">Full + blur</button><button data-v="crop">Zoom fill</button></div></div>
+      <div class="opt"><label>Extras</label>
+        <div class="checks"><label><input id="captions" type="checkbox" checked> Captions</label>
+          <label><input id="hook" type="checkbox" checked> Hook text</label></div></div>
+    </div>
+    <div class="err" id="err"></div>
+  </section>
+
+  <section class="card" id="status">
+    <div class="allbar">
+      <div><div class="rank" id="method"></div><b id="title" style="font-size:18px"></b></div>
+      <a id="zip" class="btn primary" style="flex:0 0 auto;display:none" href="#">Download all (.zip)</a>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="stage"><span id="stage">Starting</span><b id="pct">0%</b></div>
+    <div class="grid" id="clips"></div>
+  </section>
+
+  <section id="how">
+    <div class="how">
+      <div><span class="n">01</span><h3>Finds the best moments</h3><p>Uses YouTube's "Most replayed" graph when there is one, otherwise listens for the loudest reactions.</p></div>
+      <div><span class="n">02</span><h3>Downloads only those parts</h3><p>No need to grab a 4 hour stream. Only the moments are fetched, then cut on a finished sentence.</p></div>
+      <div><span class="n">03</span><h3>Edits it for Shorts and Reels</h3><p>1080×1920, word-by-word captions, a hook on top and loudness set for phones (-14 LUFS).</p></div>
+      <div><span class="n">04</span><h3>Ready to post</h3><p>Every clip comes with a caption, hashtags and a credit line for the original creator.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    Only clip videos you have the right to use, and always credit the original creator. Clips are deleted from our server after a few hours.
+  </footer>
+</div>
+
+<script src="config.js"></script>
+<script>
+const API = (window.API_BASE || "").replace(/\/$/, "");
+const $ = s => document.querySelector(s);
+const state = { src: "link", style: "neon", layout: "blur" };
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
+  state.src = t.dataset.src;
+  $("#url").style.display = state.src === "link" ? "" : "none";
+  $("#drop").style.display = state.src === "file" ? "" : "none";
+});
+$("#drop").onclick = () => $("#file").click();
+$("#file").onchange = () => {
+  const f = $("#file").files[0];
+  $("#drop").textContent = f ? `${f.name} (${(f.size/1048576).toFixed(0)} MB)` : "Tap to choose a video file";
+  $("#drop").classList.toggle("has", !!f);
+};
+document.querySelectorAll(".seg").forEach(seg => seg.querySelectorAll("button").forEach(b => b.onclick = () => {
+  seg.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  state[seg.dataset.k] = b.dataset.v;
+}));
+$("#num").oninput = e => $("#numv").textContent = e.target.value;
+$("#len").oninput = e => $("#lenv").textContent = e.target.value + "s";
+
+$("#go").onclick = async () => {
+  $("#err").textContent = "";
+  const fd = new FormData();
+  if (state.src === "link") {
+    const u = $("#url").value.trim();
+    if (!u) { $("#err").textContent = "Paste a link first."; return; }
+    fd.append("url", u);
+  } else {
+    const f = $("#file").files[0];
+    if (!f) { $("#err").textContent = "Choose a video file first."; return; }
+    fd.append("file", f);
+  }
+  fd.append("num_clips", $("#num").value);
+  fd.append("clip_len", $("#len").value);
+  fd.append("style", state.style);
+  fd.append("layout", state.layout);
+  fd.append("captions", $("#captions").checked);
+  fd.append("hook", $("#hook").checked);
+  $("#go").disabled = true;
+  $("#go").textContent = state.src === "file" ? "Uploading…" : "Starting…";
+  try {
+    const r = await fetch(API + "/api/jobs", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "Something went wrong.");
+    history.replaceState(null, "", "#job=" + j.id);
+    watch(j.id);
+  } catch (e) {
+    $("#err").textContent = e.message;
+    resetBtn();
+  }
+};
+function resetBtn(){ $("#go").disabled = false; $("#go").textContent = "Make clips →"; }
+
+let shown = new Set();
+async function watch(id) {
+  $("#status").style.display = "block";
+  $("#clips").innerHTML = ""; shown = new Set();
+  $("#zip").style.display = "none";
+  $("#status").scrollIntoView({ behavior: "smooth" });
+  while (true) {
+    let job;
+    try { job = await (await fetch(API + "/api/jobs/" + id)).json(); } catch { await sleep(3000); continue; }
+    if (job.detail) { $("#stage").textContent = job.detail; resetBtn(); return; }
+    $("#title").textContent = job.title || "";
+    $("#method").textContent = job.method ? "Picked by " + job.method : "";
+    const p = job.progress || 0;
+    $("#prog").style.width = p + "%";
+    $("#pct").textContent = p + "%";
+    $("#stage").textContent = job.status === "queued" && job.ahead ? `Waiting in line (${job.ahead} ahead of you)` : job.stage;
+    (job.clips || []).forEach(c => addClip(id, c));
+    if (job.status === "done") {
+      $("#zip").href = `${API}/files/${id}/clips.zip`; $("#zip").style.display = "";
+      rank(job.clips); resetBtn(); return;
+    }
+    if (job.status === "error") {
+      $("#stage").innerHTML = ""; $("#stage").append(Object.assign(document.createElement("span"),
+        { textContent: job.error, style: "color:var(--danger)" }));
+      resetBtn(); return;
+    }
+    await sleep(1500);
+  }
+}
+function addClip(id, c) {
+  if (shown.has(c.file)) return;
+  shown.add(c.file);
+  const el = document.createElement("div");
+  el.className = "clip"; el.dataset.file = c.file;
+  const v = document.createElement("video");
+  v.src = `${API}/files/${id}/${c.file}`; v.poster = `${API}/files/${id}/${c.thumb}`;
+  v.controls = true; v.playsInline = true; v.preload = "none";
+  const meta = document.createElement("div"); meta.className = "meta";
+  const rk = document.createElement("div"); rk.className = "rank";
+  rk.textContent = `${c.length}s · from ${Math.floor(c.start/60)}:${String(Math.floor(c.start%60)).padStart(2,"0")}`;
+  const cap = document.createElement("div"); cap.className = "cap"; cap.textContent = c.caption;
+  const tags = document.createElement("div"); tags.className = "tags"; tags.textContent = c.hashtags.join(" ");
+  const btns = document.createElement("div"); btns.className = "btns";
+  const dl = Object.assign(document.createElement("a"), { className: "btn primary", textContent: "Download",
+    href: `${API}/files/${id}/${c.file}?dl=1`, download: c.file });
+  const cp = Object.assign(document.createElement("button"), { className: "btn", textContent: "Copy caption" });
+  cp.onclick = async () => {
+    const txt = [c.caption, "", c.hashtags.join(" "), c.credit ? "\n" + c.credit : ""].join("\n").trim();
+    try { await navigator.clipboard.writeText(txt); cp.textContent = "Copied ✓"; } catch { cp.textContent = "Copy failed"; }
+    setTimeout(() => cp.textContent = "Copy caption", 1500);
+  };
+  btns.append(dl, cp);
+  meta.append(rk, cap, tags, btns);
+  el.append(v, meta);
+  $("#clips").append(el);
+}
+function rank(clips) {
+  [...clips].sort((a,b) => b.score - a.score).forEach((c, i) => {
+    const el = document.querySelector(`.clip[data-file="${c.file}"] .rank`);
+    if (el && i === 0) el.textContent = "★ BEST · " + el.textContent;
+  });
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const m = location.hash.match(/job=([0-9a-f]{12})/);
+if (m) watch(m[1]);
+</script>
+</body>
+</html>
