@@ -138,15 +138,17 @@ def get_whisper():
 
 # --------------------------------------------------------- moment finding
 def pick_windows(scores: list[tuple[float, float]], duration: float, n: int,
-                 length: float, skip_intro: float) -> list[tuple[float, float, float]]:
+                 length: float, skip_intro: float, skip_outro: float = 0.0) -> list[tuple[float, float, float]]:
     """scores: (time, score). Returns up to n non-overlapping (start, end, score) windows.
-    The peak sits ~60% into the window so the setup plays before the payoff."""
+    The peak sits ~60% into the window so the setup plays before the payoff.
+    The intro and outro (end screens, "subscribe" music) are left out."""
     chosen: list[tuple[float, float, float]] = []
+    last = max(length, duration - skip_outro)
     for t, sc in sorted(scores, key=lambda x: -x[1]):
-        if t < skip_intro:
+        if t < skip_intro or t > last:
             continue
         start = max(0.0, t - length * 0.6)
-        end = min(duration, start + length)
+        end = min(last, start + length)
         start = max(0.0, end - length)
         if any(not (end + 4 <= s or start >= e + 4) for s, e, _ in chosen):
             continue
@@ -362,7 +364,8 @@ def process(job_id: str, opts: dict):
             method = "loudness spikes"
             if not upload:
                 audio.unlink(missing_ok=True)
-        windows = pick_windows(scores, duration, n, length, skip_intro)
+        skip_outro = min(40.0, duration * 0.05) if duration > 120 else 0.0
+        windows = pick_windows(scores, duration, n, length, skip_intro, skip_outro)
         if not windows:  # short video: just take it from the top
             windows = [(0.0, min(duration, length), 1.0)]
         update(job_id, method=method, stage=f"Found {len(windows)} moments", progress=15)
@@ -381,7 +384,9 @@ def process(job_id: str, opts: dict):
                 for f in jdir.glob(f"raw_{i}.*"):
                     f.unlink()
                 ytdl({
-                    "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
+                    # Prefer plain https H.264 <=1080p: HLS / VP9-HDR streams can't be section-cut reliably.
+                    "format": "bv*+ba/b",
+                    "format_sort": ["res:1080", "proto:https", "vcodec:avc", "acodec:aac"],
                     "merge_output_format": "mp4",
                     "download_ranges": download_range_func(None, [(s, min(duration, e + pad))]),
                     "outtmpl": str(jdir / f"raw_{i}.%(ext)s"),
