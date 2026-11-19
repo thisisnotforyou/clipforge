@@ -81,6 +81,13 @@ def probe_duration(path: Path) -> float:
     return float(out or 0)
 
 
+def probe_size(path: Path) -> tuple[int, int]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True).stdout.strip().split(",")
+    return (int(out[0]), int(out[1])) if len(out) == 2 and out[0] else (1920, 1080)
+
+
 def update(job_id: str, **kw):
     with jobs_lock:
         jobs[job_id].update(kw)
@@ -187,6 +194,70 @@ def moments_from_loudness(audio: Path) -> list[tuple[float, float]]:
     return out
 
 
+# ------------------------------------------------------------- facecam
+def find_facecam(src: Path, offset: float, length: float):
+    """Find a streamer's face-cam overlay. Returns (x, y, w, h) as fractions of the frame, or None.
+
+    1. Sample frames; a face that sits in the same spot in most of them is the cam
+       (faces in the gameplay move around).
+    2. Grow a box out from that face over pixels that barely change between frames:
+       the streamer's room behind them is still, the gameplay around the cam is not.
+    """
+    import cv2
+    import numpy as np
+
+    W, H, N = 640, 360, 16
+    raw = subprocess.run([
+        "ffmpeg", "-v", "error", "-ss", f"{offset:.2f}", "-t", f"{length:.2f}", "-i", str(src),
+        "-vf", f"fps={N / max(length, 1):.4f},scale={W}:{H}", "-frames:v", str(N),
+        "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+    n = len(raw) // (W * H)
+    if n < 6:
+        return None
+    frames = np.frombuffer(raw[: n * W * H], np.uint8).reshape(n, H, W)
+
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    faces = []
+    for i, f in enumerate(frames):
+        for (x, y, w, h) in cascade.detectMultiScale(f, 1.1, 5, minSize=(16, 16)):
+            faces.append((i, x + w / 2, y + h / 2, w))
+    best, best_frames = None, set()
+    for _, cx, cy, w in faces:
+        near = [(i, a, b, c) for i, a, b, c in faces if abs(a - cx) < 0.5 * w and abs(b - cy) < 0.5 * w]
+        fr = {i for i, *_ in near}
+        if len(fr) > len(best_frames):
+            best, best_frames = near, fr
+    if not best or len(best_frames) < max(4, n * 0.35):
+        return None
+    fx = float(np.median([a for _, a, _, _ in best]))
+    fy = float(np.median([b for _, _, b, _ in best]))
+    fw = float(np.median([c for *_, c in best]))
+
+    still = frames.astype(np.float32).std(axis=0) < 10  # True where nothing moves
+    x0, x1 = int(fx - fw * 0.8), int(fx + fw * 0.8)
+    y0, y1 = int(fy - fw * 0.8), int(fy + fw * 0.8)
+    lim = dict(l=max(0, int(fx - 6 * fw)), r=min(W, int(fx + 6 * fw)),
+               t=max(0, int(fy - 4 * fw)), b=min(H, int(fy + 4 * fw)))
+    grew = True
+    while grew:
+        grew = False
+        if x0 > lim["l"] and still[y0:y1, x0 - 1].mean() > 0.55:
+            x0 -= 1; grew = True
+        if x1 < lim["r"] and still[y0:y1, x1].mean() > 0.55:
+            x1 += 1; grew = True
+        if y0 > lim["t"] and still[y0 - 1, x0:x1].mean() > 0.55:
+            y0 -= 1; grew = True
+        if y1 < lim["b"] and still[y1, x0:x1].mean() > 0.55:
+            y1 += 1; grew = True
+    w, h = x1 - x0, y1 - y0
+    if not (2.2 * fw <= w <= 12 * fw and 1.6 * fw <= h <= 9 * fw):
+        # Room behind the streamer wasn't still enough: take a sensible box around the face.
+        w, h = 4.5 * fw, 2.9 * fw
+        x0, y0 = max(0, fx - w / 2), max(0, fy - h * 0.45)
+        w, h = min(w, W - x0), min(h, H - y0)
+    return (x0 / W, y0 / H, w / W, h / H)
+
+
 # ------------------------------------------------------------- captions
 def ass_color(hex_rgb: str, alpha: str = "00") -> str:
     r, g, b = hex_rgb[0:2], hex_rgb[2:4], hex_rgb[4:6]
@@ -216,8 +287,12 @@ def fmt_t(t: float) -> str:
     return f"{int(h)}:{int(m):02d}:{s:05.2f}"
 
 
-def build_ass(words: list[dict], hook: str, length: float, style: str) -> str:
-    st = STYLES[style]
+def build_ass(words: list[dict], hook: str, length: float, style: str, seam: int | None = None) -> str:
+    """seam: y of the line between face cam and gameplay (facecam layout). When set, the hook
+    becomes a big yellow headline on that line for the whole clip and captions move lower."""
+    st = dict(STYLES[style])
+    if seam:
+        st["cap_y"] = max(st["cap_y"], seam + 420)
     hdr = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -229,12 +304,16 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{st['font']},{st['size']},{ass_color(st['primary'])},{ass_color(st['primary'])},{ass_color(st['outline'])},&H80000000,1,0,0,0,100,100,0,0,1,{st['outline_w']},2,8,60,60,0,1
 Style: Hook,{st['font']},58,{ass_color(st['hook_fg'])},{ass_color(st['hook_fg'])},{ass_color(st['hook_bg'])},{ass_color(st['hook_bg'], '20')},1,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
+Style: Head,Arial Black,84,{ass_color('FFD21F')},{ass_color('FFD21F')},&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,7,3,5,50,50,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
-    if hook:
+    if hook and seam:
+        h = ass_escape(hook.upper())
+        lines.append(f"Dialogue: 2,{fmt_t(0)},{fmt_t(length)},Head,,0,0,0,,{{\\pos(540,{seam + 90})}}{h}")
+    elif hook:
         h = ass_escape(hook.upper() if st["upper"] else hook)
         lines.append(f"Dialogue: 1,{fmt_t(0)},{fmt_t(min(length, 4.5))},Hook,,0,0,0,,{{\\fad(150,250)}}{h}")
     act = ass_color(st["active"])
@@ -263,9 +342,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ------------------------------------------------------------- rendering
 def render_clip(src: Path, offset: float, length: float, ass_name: str, out: Path,
-                style: str, layout: str, cwd: Path):
+                style: str, layout: str, cwd: Path, cam=None, seam: int = 0):
     st = STYLES[style]
-    if layout == "crop":
+    if layout == "facecam" and cam:
+        x, y, w, h = cam
+        bot = 1920 - seam
+        vf = ("[0:v]split=2[a][b];"
+              f"[a]crop=w=iw*{w:.4f}:h=ih*{h:.4f}:x=iw*{x:.4f}:y=ih*{y:.4f},"
+              f"scale=1080:{seam}:force_original_aspect_ratio=increase,crop=1080:{seam},setsar=1[top];"
+              f"[b]scale=1080:{bot}:force_original_aspect_ratio=increase,crop=1080:{bot},setsar=1[bot];"
+              "[top][bot]vstack=2[base]")
+        st = dict(st, border=None)
+    elif layout in ("crop", "facecam"):
         vf = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[base]"
     else:  # blur: whole frame in the middle, blurred copy fills the screen
         vf = ("[0:v]split=2[a][b];"
@@ -421,9 +509,17 @@ def process(job_id: str, opts: dict):
             # 5. render
             update(job_id, stage=f"Clip {i}/{len(windows)}: editing 9:16", progress=int(base + per * 0.6))
             hook = make_hook(title, text) if opts["hook"] else ""
-            (jdir / f"clip_{i}.ass").write_text(build_ass(words, hook, want, style), encoding="utf-8")
+            cam, seam = None, 0
+            if layout == "facecam":
+                cam = find_facecam(src, offset, want)
+                if cam:
+                    sw, sh = probe_size(src)
+                    aspect = (cam[2] * sw) / max(1.0, cam[3] * sh)
+                    seam = int(round(min(820, max(560, 1080 / aspect)) / 2) * 2)
+            (jdir / f"clip_{i}.ass").write_text(build_ass(words, hook, want, style, seam or None),
+                                                encoding="utf-8")
             out = jdir / f"clip_{i}.mp4"
-            render_clip(src, offset, want, f"clip_{i}.ass", out, style, layout, jdir)
+            render_clip(src, offset, want, f"clip_{i}.ass", out, style, layout, jdir, cam, seam)
             if not upload:
                 src.unlink(missing_ok=True)
 
@@ -492,7 +588,7 @@ async def create_job(
         queued = sum(1 for j in jobs.values() if j["status"] in ("queued", "running"))
         if queued >= MAX_QUEUE:
             raise HTTPException(503, "The site is busy right now. Try again in a few minutes.")
-    if style not in STYLES or layout not in ("blur", "crop"):
+    if style not in STYLES or layout not in ("blur", "crop", "facecam"):
         raise HTTPException(400, "Unknown style or layout.")
     num_clips = max(1, min(8, num_clips))
     clip_len = max(15, min(90, clip_len))
