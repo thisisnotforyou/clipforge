@@ -108,7 +108,8 @@ footer{color:var(--muted);font-size:13px;padding:24px 0 40px;border-top:1px soli
         <div class="seg" data-k="layout"><button data-v="blur" class="on">Full + blur</button><button data-v="crop">Zoom fill</button><button data-v="facecam">Facecam split</button></div></div>
       <div class="opt"><label>Extras</label>
         <div class="checks"><label><input id="captions" type="checkbox" checked> Captions</label>
-          <label><input id="hook" type="checkbox" checked> Hook text</label></div></div>
+          <label><input id="hook" type="checkbox" checked> Hook text</label>
+          <label title="Fast start, smooth punch-in zooms on loud moments, whoosh, color pop, progress bar"><input id="viral" type="checkbox" checked> Viral edit</label></div></div>
     </div>
     <div class="err" id="err"></div>
   </section>
@@ -186,6 +187,7 @@ $("#go").onclick = async () => {
   fd.append("layout", state.layout);
   fd.append("captions", $("#captions").checked);
   fd.append("hook", $("#hook").checked);
+  fd.append("viral", $("#viral").checked);
   $("#go").disabled = true;
   $("#go").textContent = state.src === "file" ? "Uploading…" : "Starting…";
   try {

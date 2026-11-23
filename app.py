@@ -342,7 +342,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ------------------------------------------------------------- rendering
 def render_clip(src: Path, offset: float, length: float, ass_name: str, out: Path,
-                style: str, layout: str, cwd: Path, cam=None, seam: int = 0):
+                style: str, layout: str, cwd: Path, cam=None, seam: int = 0, viral=None):
     st = STYLES[style]
     if layout == "facecam" and cam:
         x, y, w, h = cam
@@ -362,6 +362,11 @@ def render_clip(src: Path, offset: float, length: float, ass_name: str, out: Pat
               "[b]scale=1080:1920:force_original_aspect_ratio=decrease,"
               "scale='if(gt(a,1),1180,iw)':-2,crop='min(iw,1080)':ih[fg];"
               "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
+    if viral is not None:
+        render_viral(src, offset, length, vf, ass_name, out, st, cwd, seam, viral)
+        run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{min(1.5, length / 2):.2f}",
+             "-i", str(out), "-frames:v", "1", "-vf", "scale=360:-2", str(out.with_suffix(".jpg"))])
+        return
     tail = "[base]"
     if st["border"]:
         vf += f";[base]drawbox=x=0:y=0:w=iw:h=ih:color=0x{st['border']}@0.95:t=14[framed]"
@@ -378,6 +383,146 @@ def render_clip(src: Path, offset: float, length: float, ass_name: str, out: Pat
     ], cwd=cwd)
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{min(1.5, length / 2):.2f}",
          "-i", str(out), "-frames:v", "1", "-vf", "scale=360:-2", str(out.with_suffix(".jpg"))])
+
+
+# ------------------------------------------------------------ viral edit
+FPS = 30
+PUNCH_ZOOM, PUNCH_IN, PUNCH_HOLD, PUNCH_OUT = 1.10, 0.35, 0.8, 0.45
+INTRO_ZOOM, INTRO_DUR = 1.08, 0.7
+BAR_COLOR = (255, 210, 31)  # same yellow as the facecam headline
+
+
+def smoothstep(x: float) -> float:
+    x = min(1.0, max(0.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def zoom_at(t: float, punches: list[float]) -> float:
+    """Zoom factor at time t: a gentle settle from 1.08 at the start, plus eased punch-ins."""
+    z = 1.0 + (INTRO_ZOOM - 1.0) * (1 - smoothstep(t / INTRO_DUR))
+    for p in punches:
+        if p <= t < p + PUNCH_IN:
+            z = max(z, 1 + (PUNCH_ZOOM - 1) * smoothstep((t - p) / PUNCH_IN))
+        elif p + PUNCH_IN <= t < p + PUNCH_IN + PUNCH_HOLD:
+            z = max(z, PUNCH_ZOOM)
+        elif p + PUNCH_IN + PUNCH_HOLD <= t < p + PUNCH_IN + PUNCH_HOLD + PUNCH_OUT:
+            k = (t - p - PUNCH_IN - PUNCH_HOLD) / PUNCH_OUT
+            z = max(z, PUNCH_ZOOM - (PUNCH_ZOOM - 1) * smoothstep(k))
+    return z
+
+
+def find_punches(pcm, sr: int, length: float, limit: int = 3) -> list[float]:
+    """Loudest moments of the clip (shouts, explosions), at least 5 s apart, as punch-in times."""
+    import numpy as np
+    hop = int(sr * 0.1)
+    n = len(pcm) // hop
+    if n < 30:
+        return []
+    rms = np.sqrt((pcm[: n * hop].reshape(n, hop) ** 2).mean(axis=1) + 1e-9)
+    db = 20 * np.log10(rms)
+    db = np.convolve(db, np.ones(3) / 3, mode="same")
+    score = db - np.median(db)
+    out: list[float] = []
+    for i in np.argsort(-score):
+        t = i * 0.1 - 0.15  # start pushing in just before the peak
+        if score[i] < 6 or len(out) >= limit:
+            break
+        if 1.2 <= t <= length - 1.8 and all(abs(t - o) >= 5 for o in out):
+            out.append(round(float(t), 2))
+    return sorted(out)
+
+
+def make_whoosh(path: Path):
+    if not path.exists():
+        run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "anoisesrc=d=0.5:c=pink:r=48000:a=0.6",
+             "-af", "highpass=f=400,lowpass=f=4500,afade=t=in:d=0.3:curve=exp,"
+                    "afade=t=out:st=0.3:d=0.2,volume=-14dB", "-ac", "2", str(path)])
+
+
+def has_audio(path: Path) -> bool:
+    return bool(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                                "stream=index", "-of", "csv=p=0", str(path)],
+                               capture_output=True, text=True).stdout.strip())
+
+
+def render_viral(src: Path, offset: float, length: float, vf: str, ass_name: str, out: Path,
+                 st: dict, cwd: Path, seam: int, viral: dict):
+    """Layout (ffmpeg) -> smooth zooms + progress bar (Python, sub-pixel) -> captions, sound (ffmpeg)."""
+    import cv2
+    import numpy as np
+
+    W, H = 1080, 1920
+    punches = viral.get("punches", [])
+    vf1 = vf + ";[base]eq=contrast=1.06:saturation=1.18,fps=30[pre]"
+    p1 = subprocess.Popen(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}", "-t", f"{length:.3f}",
+         "-i", str(src), "-filter_complex", vf1, "-map", "[pre]", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    vchain = "[0:v]"
+    if st["border"]:
+        vchain += f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{st['border']}@0.95:t=14,"
+    vchain += f"ass={ass_name}[v]"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-"]
+    audio = has_audio(src)
+    fc = vchain
+    if audio:
+        cmd += ["-ss", f"{offset:.3f}", "-t", f"{length:.3f}", "-i", str(src)]
+        fc += ";[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[ga]"
+        if punches:
+            whoosh = cwd / "whoosh.wav"
+            make_whoosh(whoosh)
+            cmd += ["-i", str(whoosh)]
+            fc += f";[2:a]asplit={len(punches)}" + "".join(f"[w{k}]" for k in range(len(punches)))
+            for k, p in enumerate(punches):
+                ms = max(0, int((p - 0.2) * 1000))
+                fc += f";[w{k}]adelay={ms}|{ms}[d{k}]"
+            fc += ";[ga]" + "".join(f"[d{k}]" for k in range(len(punches)))
+            fc += f"amix=inputs={len(punches) + 1}:normalize=0:duration=first[a]"
+        else:
+            fc += ";[ga]anull[a]"
+    cmd += ["-filter_complex", fc, "-map", "[v]"]
+    if audio:
+        cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(out)]
+    p2 = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # Zoom only the gameplay when the face cam sits on top, so the streamer's face stays still.
+    y0 = seam if seam else 0
+    rh = H - y0
+    cx, cy = W / 2, rh / 2
+    frame_bytes = W * H * 3
+    total = max(1, int(round(length * FPS)))
+    i = 0
+    try:
+        while True:
+            buf = p1.stdout.read(frame_bytes)
+            if len(buf) < frame_bytes:
+                break
+            fr = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
+            t = i / FPS
+            z = zoom_at(t, punches)
+            if z > 1.0005:
+                region = fr[y0:]
+                m = np.float32([[z, 0, (1 - z) * cx], [0, z, (1 - z) * cy]])
+                fr[y0:] = cv2.warpAffine(region, m, (W, rh), flags=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_REFLECT)
+            bar = int(W * min(1.0, (i + 1) / total))
+            fr[H - 12:, :bar] = BAR_COLOR
+            p2.stdin.write(fr.tobytes())
+            i += 1
+    finally:
+        p2.stdin.close()
+        e2 = p2.stderr.read().decode(errors="replace")
+        p2.wait()
+        p1.stdout.close()
+        e1 = p1.stderr.read().decode(errors="replace")
+        p1.wait()
+    if p2.returncode != 0 or i == 0:
+        raise RuntimeError(f"viral render failed: {(e2 or e1)[-600:]}")
 
 
 # --------------------------------------------------------------- posting
@@ -416,6 +561,7 @@ def process(job_id: str, opts: dict):
     try:
         n, length = opts["num_clips"], opts["clip_len"]
         style, layout, captions = opts["style"], opts["layout"], opts["captions"]
+        viral = opts.get("viral", False)
         info: dict = {}
         upload: Path | None = opts.get("upload")
         update(job_id, status="running", stage="Reading the video", progress=3)
@@ -492,17 +638,18 @@ def process(job_id: str, opts: dict):
             want = e - s
 
             # 4. transcribe + trim the end on a finished sentence
-            words, text = [], ""
-            if captions:
-                update(job_id, stage=f"Clip {i}/{len(windows)}: writing captions", progress=int(base + per * 0.35))
+            words, text, pcm = [], "", None
+            if captions or viral:
                 wav = jdir / f"clip_{i}.wav"
                 run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
                      "-t", f"{avail:.3f}", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
                 pcm = load_wav(wav)
+                wav.unlink(missing_ok=True)
+            if captions:
+                update(job_id, stage=f"Clip {i}/{len(windows)}: writing captions", progress=int(base + per * 0.35))
                 segs = list(get_whisper().transcribe(pcm, word_timestamps=True, vad_filter=True)[0])
                 if not segs:  # VAD drops singing / speech over loud game audio: retry without it
                     segs = list(get_whisper().transcribe(pcm, word_timestamps=True)[0])
-                wav.unlink(missing_ok=True)
                 ends = [sg.end for sg in segs if want * 0.7 <= sg.end <= avail]
                 if ends:
                     want = min(ends, key=lambda x: abs(x - want)) + 0.35
@@ -513,6 +660,20 @@ def process(job_id: str, opts: dict):
                             words.append({"word": w.word, "start": w.start, "end": min(w.end, want)})
                 text = " ".join(sg.text.strip() for sg in segs if sg.start < want)
             want = max(3.0, min(want, avail))
+
+            # 4b. viral edit: open on the first word (no dead air), find punch-in moments
+            vplan = None
+            if viral:
+                lead = words[0]["start"] - 0.25 if words else 0.0
+                if lead > 0.6 and want - lead >= max(10.0, want * 0.6):
+                    offset += lead
+                    want -= lead
+                    for w in words:
+                        w["start"] -= lead
+                        w["end"] -= lead
+                    if pcm is not None:
+                        pcm = pcm[int(lead * 16000):]
+                vplan = {"punches": find_punches(pcm, 16000, want) if pcm is not None else []}
 
             # 5. render
             update(job_id, stage=f"Clip {i}/{len(windows)}: editing 9:16", progress=int(base + per * 0.6))
@@ -527,7 +688,7 @@ def process(job_id: str, opts: dict):
             (jdir / f"clip_{i}.ass").write_text(build_ass(words, hook, want, style, seam or None),
                                                 encoding="utf-8")
             out = jdir / f"clip_{i}.mp4"
-            render_clip(src, offset, want, f"clip_{i}.ass", out, style, layout, jdir, cam, seam)
+            render_clip(src, offset, want, f"clip_{i}.ass", out, style, layout, jdir, cam, seam, vplan)
             if not upload:
                 src.unlink(missing_ok=True)
 
@@ -588,6 +749,7 @@ async def create_job(
     layout: str = Form("blur"),
     captions: bool = Form(True),
     hook: bool = Form(True),
+    viral: bool = Form(True),
 ):
     ip = client_ip(request)
     with jobs_lock:
@@ -605,7 +767,7 @@ async def create_job(
     jdir = JOBS_DIR / job_id
     jdir.mkdir()
     opts = dict(num_clips=num_clips, clip_len=float(clip_len), style=style, layout=layout,
-                captions=captions, hook=hook)
+                captions=captions, hook=hook, viral=viral)
     if file is not None and file.filename:
         dest = jdir / ("upload" + Path(file.filename).suffix.lower()[:6])
         size, cap = 0, MAX_UPLOAD_MB * 1024 * 1024
