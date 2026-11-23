@@ -258,6 +258,22 @@ def find_facecam(src: Path, offset: float, length: float):
     return (x0 / W, y0 / H, w / W, h / H)
 
 
+def add_scene_scores(scores: list[tuple[float, float]], video: Path) -> list[tuple[float, float]]:
+    """Boost seconds with lots of scene changes (fights, chases, fast cuts) on top of loudness."""
+    log = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), "-an",
+                          "-vf", "fps=2,scale=160:-2,select='gt(scene,0.25)',showinfo", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    cuts = [float(m.group(1)) for m in re.finditer(r"pts_time:([\d.]+)", log)]
+    if not cuts:
+        return scores
+    import bisect
+    out = []
+    for t, sc in scores:
+        dens = bisect.bisect_right(cuts, t + 5) - bisect.bisect_left(cuts, t - 5)
+        out.append((t, sc + 1.5 * min(dens, 6)))
+    return out
+
+
 # ------------------------------------------------------------- captions
 def ass_color(hex_rgb: str, alpha: str = "00") -> str:
     r, g, b = hex_rgb[0:2], hex_rgb[2:4], hex_rgb[4:6]
@@ -342,8 +358,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ------------------------------------------------------------- rendering
 def render_clip(src: Path, offset: float, length: float, ass_name: str, out: Path,
-                style: str, layout: str, cwd: Path, cam=None, seam: int = 0, viral=None):
+                style: str, layout: str, cwd: Path, cam=None, seam: int = 0, viral=None, plain=False):
     st = STYLES[style]
+    if plain:
+        st = dict(st, border=None)
     if layout == "facecam" and cam:
         x, y, w, h = cam
         bot = 1920 - seam
@@ -510,8 +528,9 @@ def render_viral(src: Path, offset: float, length: float, vf: str, ass_name: str
                 m = np.float32([[z, 0, (1 - z) * cx], [0, z, (1 - z) * cy]])
                 fr[y0:] = cv2.warpAffine(region, m, (W, rh), flags=cv2.INTER_LINEAR,
                                          borderMode=cv2.BORDER_REFLECT)
-            bar = int(W * min(1.0, (i + 1) / total))
-            fr[H - 12:, :bar] = BAR_COLOR
+            if viral.get("bar", True):
+                bar = int(W * min(1.0, (i + 1) / total))
+                fr[H - 12:, :bar] = BAR_COLOR
             p2.stdin.write(fr.tobytes())
             i += 1
     finally:
@@ -553,6 +572,196 @@ def make_hook(title: str, text: str) -> str:
         hook = re.sub(r"[_\-]+", " ", title)
     hook = re.sub(r"\s+", " ", hook).strip()
     return (hook[:57] + "...") if len(hook) > 60 else hook
+
+
+def make_hooks(title: str, text: str) -> list[str]:
+    """Headline candidates, best first: short lines said in the clip, then its first words, then the title."""
+    out: list[str] = []
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text.strip()) if x.strip()]
+    good = sorted([x for x in sentences if 12 <= len(x) <= 60],
+                  key=lambda x: (-(x.count("!") + x.count("?")), abs(len(x) - 32)))
+    out += good
+    first = make_hook(title, text)
+    if first not in out:
+        out.append(first)
+    # More options from the clip's own words (start / middle / end), before ever using the title.
+    words = text.split()
+    if len(words) >= 6:
+        for k in (len(words) // 2 - 3, len(words) - 7):
+            chunk = " ".join(words[max(0, k): max(0, k) + 7]).strip(" ,.")
+            if len(chunk) >= 12 and chunk not in out:
+                out.append(chunk + ("!" if not chunk.endswith(("!", "?")) else ""))
+    t = re.sub(r"[_\-]+", " ", title).strip()
+    t = (t[:57] + "...") if len(t) > 60 else t
+    if t and t not in out:
+        out.append(t)
+    return [re.sub(r"\s+", " ", h).strip() for h in out if h.strip()]
+
+
+def pick_hook(hooks: list[str], rank: int) -> str:
+    return hooks[min(rank, len(hooks) - 1)] if hooks else ""
+
+
+def credit_line(uploader: str, page_url: str, start: float) -> str:
+    if not uploader:
+        return ""
+    return f"Credit: {uploader} ({page_url}{'&' if '?' in page_url else '?'}t={int(start)})"
+
+
+def variant_specs(style: str, layout: str, n: int, reel: bool = False) -> list[dict]:
+    """Versions for A/B testing. A = the user's choice; B and C change one or two things each."""
+    alt_style = "clean" if style == "neon" else "neon"
+    alt_layout = {"facecam": "crop", "crop": "blur", "blur": "crop"}[layout]
+    names = {"neon": "Neon", "clean": "Clean", "facecam": "Facecam split", "crop": "Zoom fill",
+             "blur": "Full + blur"}
+    specs = [
+        dict(label="A", style=style, layout=layout, hook_rank=0, order="story"),
+        dict(label="B", style=alt_style, layout=layout, hook_rank=1, order="best"),
+        dict(label="C", style=style, layout=alt_layout, hook_rank=2, order="best"),
+    ][: max(1, min(3, n))]
+    for sp in specs:
+        sp["desc"] = f"{names[sp['style']]}, {names[sp['layout']]}, headline {sp['hook_rank'] + 1}"
+        if n > 1 and reel:
+            sp["desc"] += ", best moment first" if sp["order"] == "best" else ", in story order"
+    return specs
+
+
+def prepare_moment(ctx: dict, i: int, s: float, e: float, score: float, min_keep: float) -> dict:
+    """Download one moment and read it: transcript with word times, end on a finished sentence,
+    open on the first word, loud peaks for punch-ins, and where the face cam is."""
+    jdir, upload, duration = ctx["jdir"], ctx["upload"], ctx["duration"]
+    pad = 3.0
+    if upload:
+        src, offset, avail = upload, s, min(duration - s, e - s + pad)
+    else:
+        from yt_dlp.utils import download_range_func
+        for f in jdir.glob(f"raw_{i}.*"):
+            f.unlink()
+        ytdl({
+            # Prefer plain https H.264 <=1080p: HLS / VP9-HDR streams can't be section-cut reliably.
+            "format": "bv*+ba/b",
+            "format_sort": ["res:1080", "proto:https", "vcodec:avc", "acodec:aac"],
+            "merge_output_format": "mp4",
+            "download_ranges": download_range_func(None, [(s, min(duration, e + pad))]),
+            "outtmpl": str(jdir / f"raw_{i}.%(ext)s"),
+        }, ctx["page_url"])
+        src = next(f for f in jdir.glob(f"raw_{i}.*") if not f.name.endswith(".part"))
+        offset, avail = 0.0, probe_duration(src)
+    want = e - s
+
+    words, text, pcm = [], "", None
+    if ctx["captions"] or ctx["viral"]:
+        wav = jdir / f"moment_{i}.wav"
+        run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
+             "-t", f"{avail:.3f}", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
+        pcm = load_wav(wav)
+        wav.unlink(missing_ok=True)
+        segs = list(get_whisper().transcribe(pcm, word_timestamps=True, vad_filter=True)[0])
+        if not segs:  # VAD drops singing / speech over loud game audio: retry without it
+            segs = list(get_whisper().transcribe(pcm, word_timestamps=True)[0])
+        ends = [sg.end for sg in segs if want * 0.7 <= sg.end <= avail]
+        if ends:
+            want = min(ends, key=lambda x: abs(x - want)) + 0.35
+        want = min(want, avail)
+        for sg in segs:
+            for w in sg.words or []:
+                if w.start < want and w.word.strip():
+                    words.append({"word": w.word, "start": w.start, "end": min(w.end, want)})
+        text = " ".join(sg.text.strip() for sg in segs if sg.start < want)
+    want = max(3.0, min(want, avail))
+
+    punches: list[float] = []
+    if ctx["viral"]:
+        lead = words[0]["start"] - 0.25 if words else 0.0
+        if lead > 0.6 and want - lead >= max(min_keep, want * 0.6):
+            offset += lead
+            want -= lead
+            for w in words:
+                w["start"] -= lead
+                w["end"] -= lead
+            if pcm is not None:
+                pcm = pcm[int(lead * 16000):]
+        if pcm is not None:
+            punches = find_punches(pcm, 16000, want, limit=3 if want > 15 else 1)
+
+    cam, seam = None, 0
+    if ctx["need_cam"]:
+        cam = find_facecam(src, offset, want)
+        if cam:
+            sw, sh = probe_size(src)
+            aspect = (cam[2] * sw) / max(1.0, cam[3] * sh)
+            seam = int(round(min(820, max(560, 1080 / aspect)) / 2) * 2)
+    return dict(n=i, s=s, score=score, src=src, offset=offset, want=want, words=words if ctx["captions"] else [],
+                text=text, punches=punches, cam=cam, seam=seam)
+
+
+def unify_cam(moments: list[dict]):
+    """One face-cam box for a whole reel, so the top panel doesn't jump between moments."""
+    import statistics as stt
+    found = [m for m in moments if m["cam"]]
+    if len(found) < 2:
+        return
+    box = tuple(stt.median(m["cam"][k] for m in found) for k in range(4))
+    seam = int(round(stt.median(m["seam"] for m in found) / 2) * 2)
+    for m in found:
+        m["cam"], m["seam"] = box, seam
+
+
+def render_moment(ctx: dict, m: dict, sp: dict, hook: str, out: Path, bar: bool, hook_secs=None):
+    layout = sp["layout"]
+    plain = False
+    if layout == "facecam" and not m["cam"]:
+        layout, plain = "crop", True  # no face cam in this moment: fill the screen, no frame
+    seam = m["seam"] if layout == "facecam" else 0
+    ass = out.with_suffix(".ass")
+    ass.write_text(build_ass(m["words"], hook, m["want"] if hook_secs is None else hook_secs,
+                             sp["style"], seam or None), encoding="utf-8")
+    vplan = {"punches": m["punches"], "bar": bar} if ctx["viral"] else None
+    render_clip(m["src"], m["offset"], m["want"], ass.name, out, sp["style"], layout, ctx["jdir"],
+                m["cam"], seam, vplan, plain=plain)
+    ass.unlink(missing_ok=True)
+
+
+XFADE = 0.3
+
+
+def build_reel(ctx: dict, moments: list[dict], sp: dict, hook: str, out: Path):
+    """Render each moment, then merge them with short crossfades and one progress bar for the whole reel."""
+    jdir = ctx["jdir"]
+    parts = []
+    for j, m in enumerate(moments):
+        part = jdir / f"part_{sp['label']}_{j}.mp4"
+        # Facecam headline stays on every part (same text); other layouts show it on the first part only.
+        part_hook = hook if j == 0 or (sp["layout"] == "facecam" and m["cam"]) else ""
+        render_moment(ctx, m, sp, part_hook, part, bar=False)
+        parts.append((part, probe_duration(part)))
+    audio = all(has_audio(p) for p, _ in parts)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    for p, _ in parts:
+        cmd += ["-i", str(p)]
+    total = sum(d for _, d in parts) - XFADE * (len(parts) - 1)
+    cmd += ["-f", "lavfi", "-i", f"color=c=0xFFD21F:s=1080x12:r=30:d={total:.3f}"]
+    fc, v, a, t = "", "[0:v]", "[0:a]", parts[0][1]
+    for j in range(1, len(parts)):
+        fc += f"{v}[{j}:v]xfade=transition=fade:duration={XFADE}:offset={t - XFADE:.3f}[v{j}];"
+        v = f"[v{j}]"
+        if audio:
+            fc += f"{a}[{j}:a]acrossfade=d={XFADE}[a{j}];"
+            a = f"[a{j}]"
+        t += parts[j][1] - XFADE
+    bar_in = len(parts)
+    fc += f"{v}[{bar_in}:v]overlay=x='-w+w*t/{total:.3f}':y=H-h:shortest=1[vout]"
+    cmd += ["-filter_complex", fc, "-map", "[vout]"]
+    if audio:
+        cmd += ["-map", a, "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", "30",
+            "-movflags", "+faststart", str(out)]
+    run(cmd)
+    for p, _ in parts:
+        p.unlink(missing_ok=True)
+        p.with_suffix(".jpg").unlink(missing_ok=True)
+    run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", "1.5", "-i", str(out),
+         "-frames:v", "1", "-vf", "scale=360:-2", str(out.with_suffix(".jpg"))])
 
 
 # ------------------------------------------------------------------ job
@@ -604,112 +813,94 @@ def process(job_id: str, opts: dict):
                 audio = next(jdir.glob("audio.*"))
             scores = moments_from_loudness(audio)
             method = "loudness spikes"
+            if upload:
+                update(job_id, stage="Watching for fast action and scene changes", progress=11)
+                scores = add_scene_scores(scores, upload)
+                method = "loudness spikes + scene changes"
             if not upload:
                 audio.unlink(missing_ok=True)
         skip_outro = min(40.0, duration * 0.05) if duration > 120 else 0.0
+        if opts.get("mode") == "reel":
+            # A reel = several short moments: the length slider is the whole reel's length.
+            n = max(3, min(8, n))
+            length = max(5.0, min(15.0, opts["clip_len"] / n * 1.15))
         windows = pick_windows(scores, duration, n, length, skip_intro, skip_outro)
         if not windows:  # short video: just take it from the top
             windows = [(0.0, min(duration, length), 1.0)]
         update(job_id, method=method, stage=f"Found {len(windows)} moments", progress=15)
 
-        clips = []
-        per = 80 / len(windows)
-        for i, (s, e, sc) in enumerate(windows, 1):
-            base = 15 + per * (i - 1)
-            # 3. get the part
-            update(job_id, stage=f"Clip {i}/{len(windows)}: downloading the moment", progress=int(base))
-            pad = 3.0
-            if upload:
-                src, offset, avail = upload, s, min(duration - s, e - s + pad)
-            else:
-                from yt_dlp.utils import download_range_func
-                for f in jdir.glob(f"raw_{i}.*"):
-                    f.unlink()
-                ytdl({
-                    # Prefer plain https H.264 <=1080p: HLS / VP9-HDR streams can't be section-cut reliably.
-                    "format": "bv*+ba/b",
-                    "format_sort": ["res:1080", "proto:https", "vcodec:avc", "acodec:aac"],
-                    "merge_output_format": "mp4",
-                    "download_ranges": download_range_func(None, [(s, min(duration, e + pad))]),
-                    "outtmpl": str(jdir / f"raw_{i}.%(ext)s"),
-                }, page_url)
-                src = next(f for f in jdir.glob(f"raw_{i}.*") if not f.name.endswith(".part"))
-                offset, avail = 0.0, probe_duration(src)
-            want = e - s
+        specs = variant_specs(style, layout, opts.get("variants", 1), reel=opts.get("mode") == "reel")
+        need_cam = any(sp["layout"] == "facecam" for sp in specs)
+        ctx = dict(jdir=jdir, upload=upload, duration=duration, page_url=page_url, captions=captions,
+                   viral=viral, need_cam=need_cam)
+        tags = hashtags_for(title, ["shorts", "clips", "gaming"])
+        clips: list[dict] = []
 
-            # 4. transcribe + trim the end on a finished sentence
-            words, text, pcm = [], "", None
-            if captions or viral:
-                wav = jdir / f"clip_{i}.wav"
-                run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{offset:.3f}",
-                     "-t", f"{avail:.3f}", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
-                pcm = load_wav(wav)
-                wav.unlink(missing_ok=True)
-            if captions:
-                update(job_id, stage=f"Clip {i}/{len(windows)}: writing captions", progress=int(base + per * 0.35))
-                segs = list(get_whisper().transcribe(pcm, word_timestamps=True, vad_filter=True)[0])
-                if not segs:  # VAD drops singing / speech over loud game audio: retry without it
-                    segs = list(get_whisper().transcribe(pcm, word_timestamps=True)[0])
-                ends = [sg.end for sg in segs if want * 0.7 <= sg.end <= avail]
-                if ends:
-                    want = min(ends, key=lambda x: abs(x - want)) + 0.35
-                want = min(want, avail)
-                for sg in segs:
-                    for w in sg.words or []:
-                        if w.start < want and w.word.strip():
-                            words.append({"word": w.word, "start": w.start, "end": min(w.end, want)})
-                text = " ".join(sg.text.strip() for sg in segs if sg.start < want)
-            want = max(3.0, min(want, avail))
-
-            # 4b. viral edit: open on the first word (no dead air), find punch-in moments
-            vplan = None
-            if viral:
-                lead = words[0]["start"] - 0.25 if words else 0.0
-                if lead > 0.6 and want - lead >= max(10.0, want * 0.6):
-                    offset += lead
-                    want -= lead
-                    for w in words:
-                        w["start"] -= lead
-                        w["end"] -= lead
-                    if pcm is not None:
-                        pcm = pcm[int(lead * 16000):]
-                vplan = {"punches": find_punches(pcm, 16000, want) if pcm is not None else []}
-
-            # 5. render
-            update(job_id, stage=f"Clip {i}/{len(windows)}: editing 9:16", progress=int(base + per * 0.6))
-            hook = make_hook(title, text) if opts["hook"] else ""
-            cam, seam = None, 0
-            if layout == "facecam":
-                cam = find_facecam(src, offset, want)
-                if cam:
-                    sw, sh = probe_size(src)
-                    aspect = (cam[2] * sw) / max(1.0, cam[3] * sh)
-                    seam = int(round(min(820, max(560, 1080 / aspect)) / 2) * 2)
-            (jdir / f"clip_{i}.ass").write_text(build_ass(words, hook, want, style, seam or None),
-                                                encoding="utf-8")
-            out = jdir / f"clip_{i}.mp4"
-            render_clip(src, offset, want, f"clip_{i}.ass", out, style, layout, jdir, cam, seam, vplan)
-            if not upload:
-                src.unlink(missing_ok=True)
-
-            ts = int(s)
-            credit = f"Credit: {uploader} ({page_url}{'&' if '?' in page_url else '?'}t={ts})" if uploader else ""
-            tags = hashtags_for(title, ["shorts", "clips", "gaming"])
-            caption = hook or title
-            clips.append({
-                "n": i, "file": out.name, "thumb": out.with_suffix(".jpg").name,
-                "start": round(s, 1), "length": round(want, 1), "score": round(sc, 3),
-                "hook": hook, "caption": caption, "hashtags": tags, "credit": credit,
-                "transcript": text,
-            })
-            update(job_id, clips=clips)
+        if opts.get("mode") == "reel":
+            # Cut & merge: several short moments -> one highlight reel per variant.
+            moments = []
+            per = 55 / len(windows)
+            for i, (s, e, sc) in enumerate(windows, 1):
+                update(job_id, stage=f"Reading moment {i}/{len(windows)}", progress=int(15 + per * (i - 1)))
+                moments.append(prepare_moment(ctx, i, s, e, sc, min_keep=4.0))
+            unify_cam(moments)
+            reel_hooks = make_hooks(title, " ".join(m["text"] for m in sorted(moments, key=lambda m: -m["score"])))
+            per = 25 / len(specs)
+            for k, sp in enumerate(specs):
+                update(job_id, stage=f"Merging reel version {sp['label']}", progress=int(70 + per * k))
+                order = (sorted(moments, key=lambda m: -m["score"]) if sp["order"] == "best"
+                         else sorted(moments, key=lambda m: m["s"]))
+                hook = pick_hook(reel_hooks, sp["hook_rank"]) if opts["hook"] else ""
+                out = jdir / f"reel_{sp['label']}.mp4"
+                build_reel(ctx, order, sp, hook, out)
+                total = round(probe_duration(out), 1)
+                clips.append({
+                    "n": k + 1, "file": out.name, "thumb": out.with_suffix(".jpg").name, "kind": "reel",
+                    "variant": sp["label"], "variant_desc": sp["desc"],
+                    "start": round(order[0]["s"], 1), "length": total,
+                    "score": round(sum(m["score"] for m in moments) - k * 1e-3, 3),
+                    "hook": hook, "caption": hook or title, "hashtags": tags,
+                    "credit": credit_line(uploader, page_url, order[0]["s"]),
+                    "transcript": " / ".join(m["text"] for m in order),
+                    "parts": [round(m["s"], 1) for m in order],
+                })
+                update(job_id, clips=clips)
+            for m in moments:
+                if not upload:
+                    m["src"].unlink(missing_ok=True)
+        else:
+            per = 80 / len(windows)
+            for i, (s, e, sc) in enumerate(windows, 1):
+                base = 15 + per * (i - 1)
+                update(job_id, stage=f"Clip {i}/{len(windows)}: downloading and reading", progress=int(base))
+                m = prepare_moment(ctx, i, s, e, sc, min_keep=10.0)
+                hooks = make_hooks(title, m["text"])
+                for k, sp in enumerate(specs):
+                    update(job_id, stage=f"Clip {i}/{len(windows)}: editing version {sp['label']}",
+                           progress=int(base + per * (0.5 + 0.5 * k / len(specs))))
+                    suffix = "" if len(specs) == 1 else f"_{sp['label']}"
+                    out = jdir / f"clip_{i}{suffix}.mp4"
+                    hook = pick_hook(hooks, sp["hook_rank"]) if opts["hook"] else ""
+                    render_moment(ctx, m, sp, hook, out, bar=True)
+                    clips.append({
+                        "n": i, "file": out.name, "thumb": out.with_suffix(".jpg").name, "kind": "clip",
+                        "variant": sp["label"] if len(specs) > 1 else "", "variant_desc": sp["desc"],
+                        "start": round(s, 1), "length": round(m["want"], 1), "score": round(sc - k * 1e-3, 3),
+                        "hook": hook, "caption": hook or title, "hashtags": tags,
+                        "credit": credit_line(uploader, page_url, s), "transcript": m["text"],
+                    })
+                    update(job_id, clips=clips)
+                if not upload:
+                    m["src"].unlink(missing_ok=True)
 
         # 6. posting notes + zip, best first
         ranked = sorted(clips, key=lambda c: -c["score"])
         md = [f"# Clips from: {title}", f"Moments picked by {method}.", ""]
         for r, c in enumerate(ranked, 1):
-            md += [f"## #{r} - {c['file']}  (starts {int(c['start'] // 60)}:{int(c['start'] % 60):02d} in the source)",
-                   "", c["caption"], "", " ".join(c["hashtags"]), ""]
+            what = "Highlight reel" if c["kind"] == "reel" else "Clip"
+            ver = f" - version {c['variant']} ({c['variant_desc']})" if c["variant"] else ""
+            md += [f"## #{r} - {c['file']}: {what}{ver}, {c['length']}s", "", c["caption"], "",
+                   " ".join(c["hashtags"]), ""]
             if c["credit"]:
                 md += [c["credit"], ""]
         (jdir / "POSTING.md").write_text("\n".join(md), encoding="utf-8")
@@ -750,6 +941,8 @@ async def create_job(
     captions: bool = Form(True),
     hook: bool = Form(True),
     viral: bool = Form(True),
+    mode: str = Form("clips"),
+    variants: int = Form(1),
 ):
     ip = client_ip(request)
     with jobs_lock:
@@ -767,7 +960,8 @@ async def create_job(
     jdir = JOBS_DIR / job_id
     jdir.mkdir()
     opts = dict(num_clips=num_clips, clip_len=float(clip_len), style=style, layout=layout,
-                captions=captions, hook=hook, viral=viral)
+                captions=captions, hook=hook, viral=viral,
+                mode=mode if mode in ("clips", "reel") else "clips", variants=max(1, min(3, variants)))
     if file is not None and file.filename:
         dest = jdir / ("upload" + Path(file.filename).suffix.lower()[:6])
         size, cap = 0, MAX_UPLOAD_MB * 1024 * 1024

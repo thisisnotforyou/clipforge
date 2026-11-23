@@ -98,9 +98,13 @@ footer{color:var(--muted);font-size:13px;padding:24px 0 40px;border-top:1px soli
     </div>
 
     <div class="opts">
-      <div class="opt"><label>Number of clips</label>
+      <div class="opt"><label>Output</label>
+        <div class="seg" data-k="mode"><button data-v="clips" class="on">Separate clips</button><button data-v="reel">Highlight reel</button></div></div>
+      <div class="opt"><label>Versions (A/B test)</label>
+        <div class="seg" data-k="variants"><button data-v="1" class="on">1</button><button data-v="2">2</button><button data-v="3">3</button></div></div>
+      <div class="opt"><label id="numlbl">Number of clips</label>
         <div class="range"><input id="num" type="range" min="1" max="15" value="10"><b id="numv">10</b></div></div>
-      <div class="opt"><label>Clip length</label>
+      <div class="opt"><label id="lenlbl">Clip length</label>
         <div class="range"><input id="len" type="range" min="15" max="90" step="5" value="30"><b id="lenv">30s</b></div></div>
       <div class="opt"><label>Editing style</label>
         <div class="seg" data-k="style"><button data-v="neon" class="on">Neon</button><button data-v="clean">Clean</button></div></div>
@@ -142,7 +146,7 @@ footer{color:var(--muted);font-size:13px;padding:24px 0 40px;border-top:1px soli
 <script>
 const API = (window.API_BASE || "").replace(/\/$/, "");
 const $ = s => document.querySelector(s);
-const state = { src: "link", style: "neon", layout: "blur" };
+const state = { src: "link", style: "neon", layout: "blur", mode: "clips", variants: "1" };
 
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
@@ -165,7 +169,17 @@ $("#file").onchange = () => {
 document.querySelectorAll(".seg").forEach(seg => seg.querySelectorAll("button").forEach(b => b.onclick = () => {
   seg.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
   state[seg.dataset.k] = b.dataset.v;
+  if (seg.dataset.k === "mode") setMode();
 }));
+function setMode() {
+  const reel = state.mode === "reel";
+  $("#numlbl").textContent = reel ? "Moments in the reel" : "Number of clips";
+  $("#lenlbl").textContent = reel ? "Reel length" : "Clip length";
+  $("#num").max = reel ? 8 : 15;
+  if (reel) { $("#num").value = Math.min(+$("#num").value, 6); $("#len").value = 45; }
+  else { $("#len").value = 30; }
+  $("#numv").textContent = $("#num").value; $("#lenv").textContent = $("#len").value + "s";
+}
 $("#num").oninput = e => $("#numv").textContent = e.target.value;
 $("#len").oninput = e => $("#lenv").textContent = e.target.value + "s";
 
@@ -188,6 +202,8 @@ $("#go").onclick = async () => {
   fd.append("captions", $("#captions").checked);
   fd.append("hook", $("#hook").checked);
   fd.append("viral", $("#viral").checked);
+  fd.append("mode", state.mode);
+  fd.append("variants", state.variants);
   $("#go").disabled = true;
   $("#go").textContent = state.src === "file" ? "Uploading…" : "Starting…";
   try {
@@ -242,7 +258,10 @@ function addClip(id, c) {
   v.controls = true; v.playsInline = true; v.preload = "none";
   const meta = document.createElement("div"); meta.className = "meta";
   const rk = document.createElement("div"); rk.className = "rank";
-  rk.textContent = `${c.length}s · from ${Math.floor(c.start/60)}:${String(Math.floor(c.start%60)).padStart(2,"0")}`;
+  const at = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+  rk.textContent = (c.kind === "reel" ? `REEL · ${c.length}s · ${(c.parts||[]).length} moments` : `${c.length}s · from ${at(c.start)}`)
+    + (c.variant ? ` · VERSION ${c.variant}` : "");
+  if (c.variant_desc && c.variant) rk.title = c.variant_desc;
   const cap = document.createElement("div"); cap.className = "cap"; cap.textContent = c.caption;
   const tags = document.createElement("div"); tags.className = "tags"; tags.textContent = c.hashtags.join(" ");
   const btns = document.createElement("div"); btns.className = "btns";
@@ -255,7 +274,9 @@ function addClip(id, c) {
     setTimeout(() => cp.textContent = "Copy caption", 1500);
   };
   btns.append(dl, cp);
-  meta.append(rk, cap, tags, btns);
+  const desc = document.createElement("div"); desc.className = "tags"; desc.style.color = "var(--muted)";
+  desc.textContent = c.variant ? c.variant_desc : "";
+  meta.append(rk, cap, desc, tags, btns);
   el.append(v, meta);
   $("#clips").append(el);
 }
