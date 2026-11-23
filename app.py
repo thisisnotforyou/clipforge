@@ -396,8 +396,16 @@ def hashtags_for(title: str, extra: list[str]) -> list[str]:
 
 
 def make_hook(title: str, text: str) -> str:
-    first = re.split(r"(?<=[.!?])\s+", text.strip())[0] if text.strip() else ""
-    hook = first if 12 <= len(first) <= 60 else title
+    """Headline: a short line said in the clip; else its first words; the title only as a last resort."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    good = [s for s in sentences if 12 <= len(s) <= 60]
+    if good:
+        hook = good[0]
+    elif text.strip():
+        words = text.split()
+        hook = " ".join(words[:8]) + ("..." if len(words) > 8 else "")
+    else:
+        hook = re.sub(r"[_\-]+", " ", title)
     hook = re.sub(r"\s+", " ", hook).strip()
     return (hook[:57] + "...") if len(hook) > 60 else hook
 
@@ -574,7 +582,7 @@ async def create_job(
     request: Request,
     url: str = Form(""),
     file: Optional[UploadFile] = File(None),
-    num_clips: int = Form(3),
+    num_clips: int = Form(10),
     clip_len: int = Form(30),
     style: str = Form("neon"),
     layout: str = Form("blur"),
@@ -590,7 +598,7 @@ async def create_job(
             raise HTTPException(503, "The site is busy right now. Try again in a few minutes.")
     if style not in STYLES or layout not in ("blur", "crop", "facecam"):
         raise HTTPException(400, "Unknown style or layout.")
-    num_clips = max(1, min(8, num_clips))
+    num_clips = max(1, min(15, num_clips))
     clip_len = max(15, min(90, clip_len))
 
     job_id = uuid.uuid4().hex[:12]

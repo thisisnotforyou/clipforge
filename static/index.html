@@ -92,14 +92,14 @@ footer{color:var(--muted);font-size:13px;padding:24px 0 40px;border-top:1px soli
     </div>
     <div class="row">
       <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
-      <div id="drop" class="drop" style="display:none">Tap to choose a video file (MP4, MOV, MKV)</div>
+      <div id="drop" class="drop" style="display:none">Drop your video here, or tap to choose (MP4, MOV, MKV)</div>
       <input id="file" type="file" accept="video/*" hidden>
       <button id="go" class="go">Make clips →</button>
     </div>
 
     <div class="opts">
       <div class="opt"><label>Number of clips</label>
-        <div class="range"><input id="num" type="range" min="1" max="8" value="3"><b id="numv">3</b></div></div>
+        <div class="range"><input id="num" type="range" min="1" max="15" value="10"><b id="numv">10</b></div></div>
       <div class="opt"><label>Clip length</label>
         <div class="range"><input id="len" type="range" min="15" max="90" step="5" value="30"><b id="lenv">30s</b></div></div>
       <div class="opt"><label>Editing style</label>
@@ -150,6 +150,12 @@ document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("#drop").style.display = state.src === "file" ? "" : "none";
 });
 $("#drop").onclick = () => $("#file").click();
+["dragenter", "dragover"].forEach(ev => $("#drop").addEventListener(ev, e => { e.preventDefault(); $("#drop").classList.add("has"); }));
+$("#drop").addEventListener("dragleave", () => $("#drop").classList.toggle("has", !!$("#file").files[0]));
+$("#drop").addEventListener("drop", e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) { $("#file").files = e.dataTransfer.files; $("#file").onchange(); }
+});
 $("#file").onchange = () => {
   const f = $("#file").files[0];
   $("#drop").textContent = f ? `${f.name} (${(f.size/1048576).toFixed(0)} MB)` : "Tap to choose a video file";

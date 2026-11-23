@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 yt-dlp[default]
-deno
+deno>=2
 faster-whisper
 numpy
 opencv-python-headless<5
